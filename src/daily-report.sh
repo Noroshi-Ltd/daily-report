@@ -1,7 +1,8 @@
 #!/bin/bash
 
 # daily-report.sh - 前日の GitHub 活動を日報として記録・Slack 通知
-# VPS cron: 0 2 * * * /home/haruya/project/Noroshi-Ltd/daily-report/src/daily-report.sh >> ~/daily-report.log 2>&1
+# Mac mini launchd: 毎日 02:00 JST に自動実行
+# 手動実行: bash ~/project/Noroshi-Ltd/daily-report/src/daily-report.sh
 #
 # 処理の流れ:
 #   1. GitHub 組織全体の前日活動（コミット・PR・Issue）を収集
@@ -10,11 +11,21 @@
 #
 # !! このファイルはソースコードです。変更する場合は PR レビューを経てください !!
 
-# ---------- 初期化 ----------
+# ---------- PATH 設定（launchd は環境変数を継承しないため明示設定）----------
+
+# Apple Silicon Mac: /opt/homebrew/bin
+# Intel Mac:        /usr/local/bin
+if [[ -d "/opt/homebrew/bin" ]]; then
+    export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+elif [[ -d "/usr/local/bin" ]]; then
+    export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
+fi
+
+# ---------- 設定 ----------
 
 ORG="Noroshi-Ltd"
-REPORT_REPO="daily-report"      # 日報を保存するリポジトリ
-REPORT_PATH_PREFIX="reports"    # リポジトリ内の保存先ディレクトリ
+REPORT_REPO="daily-report"
+REPORT_PATH_PREFIX="reports"
 ENV_FILE="$HOME/.env-openclaw"
 
 # ---------- 環境変数読み込み ----------
@@ -28,7 +39,7 @@ load_env() {
     SLACK_NOTIFY_CHANNEL="${SLACK_NOTIFY_CHANNEL:-C0AGCDY92KU}"
 }
 
-# ---------- Slack 投稿（ohayou-notify.sh と同パターン）----------
+# ---------- Slack 投稿 ----------
 
 post_to_slack() {
     local text="$1"
@@ -66,7 +77,6 @@ print(json.dumps({'channel': channel, 'text': text, 'mrkdwn': True}))
 
 # ---------- URL エンコード ----------
 
-# +09:00 の + がクエリパラメータ中でスペース解釈されるのを防ぐ
 urlencode() {
     python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$1"
 }
@@ -80,7 +90,6 @@ get_org_repos() {
 
 # ---------- コミット収集 ----------
 
-# 出力: "author_name TAB repo TAB sha7 TAB message" の TSV（全リポジトリ分）
 collect_commits() {
     local since="$1"
     local until="$2"
@@ -94,7 +103,6 @@ collect_commits() {
 
     while IFS= read -r repo; do
         [ -z "$repo" ] && continue
-        # gh api の --jq は jq の --arg をサポートしないため jq にパイプする
         gh api \
             "repos/${ORG}/${repo}/commits?since=${since_enc}&until=${until_enc}&per_page=100" \
             2>/dev/null \
@@ -111,7 +119,6 @@ collect_commits() {
 
 # ---------- マージ済み PR 収集 ----------
 
-# 出力: "repo TAB number TAB title TAB author" の TSV
 collect_merged_prs() {
     local date="$1"
     gh api \
@@ -127,11 +134,9 @@ collect_merged_prs() {
 
 # ---------- Issue 収集 ----------
 
-# 出力: "repo TAB number TAB title TAB author TAB event" の TSV
 collect_issues() {
     local date="$1"
 
-    # 新規オープン
     gh api \
         "search/issues?q=org:${ORG}+is:issue+created:${date}&per_page=100" \
         --jq '.items[] | [
@@ -143,7 +148,6 @@ collect_issues() {
         ] | @tsv' \
         2>/dev/null || true
 
-    # クローズ済み
     gh api \
         "search/issues?q=org:${ORG}+is:issue+is:closed+closed:${date}&per_page=100" \
         --jq '.items[] | [
@@ -164,29 +168,21 @@ generate_report() {
     local prs_tsv="$3"
     local issues_tsv="$4"
 
-    local generated_at
-    generated_at=$(date '+%Y-%m-%d %H:%M:%S')
-
     printf '# 日報 %s\n\n' "$date"
-    printf '> 自動生成: %s JST\n\n' "$generated_at"
+    printf '> 自動生成: %s JST\n\n' "$(date '+%Y-%m-%d %H:%M:%S')"
     printf '---\n\n'
 
-    # ── コミットセクション ──
     printf '## コミット\n\n'
-
     if [ -z "$commits_tsv" ]; then
         printf '前日のコミットはありませんでした。\n\n'
     else
         local authors
         authors=$(echo "$commits_tsv" | awk -F'\t' '{print $1}' | sort -u)
-
         while IFS= read -r author; do
             [ -z "$author" ] && continue
-            local author_commits
+            local author_commits count
             author_commits=$(echo "$commits_tsv" | awk -F'\t' -v a="$author" '$1 == a')
-            local count
             count=$(echo "$author_commits" | grep -c . || echo "0")
-
             printf '### %s (%s commits)\n\n' "$author" "$count"
             while IFS=$'\t' read -r _auth repo sha msg; do
                 [ -z "$sha" ] && continue
@@ -196,16 +192,13 @@ generate_report() {
         done <<< "$authors"
     fi
 
-    # ── マージ済み PR セクション ──
     printf '## マージされた PR\n\n'
-
     if [ -z "$prs_tsv" ]; then
         printf '前日にマージされた PR はありませんでした。\n\n'
     else
         local pr_count
         pr_count=$(echo "$prs_tsv" | grep -c . || echo "0")
         printf '合計 %s 件\n\n' "$pr_count"
-
         while IFS=$'\t' read -r repo num title author; do
             [ -z "$num" ] && continue
             printf '- **[%s#%s]** %s _(@%s)_\n' "$repo" "$num" "$title" "$author"
@@ -213,14 +206,11 @@ generate_report() {
         printf '\n'
     fi
 
-    # ── Issue セクション ──
     printf '## Issue の動き\n\n'
-
     if [ -z "$issues_tsv" ]; then
         printf '前日の Issue の動きはありませんでした。\n\n'
     else
         local opened_issues closed_issues
-
         opened_issues=$(echo "$issues_tsv" | awk -F'\t' '$5 == "opened"')
         closed_issues=$(echo "$issues_tsv" | awk -F'\t' '$5 == "closed"')
 
@@ -257,16 +247,15 @@ save_to_github() {
     local file_path="$1"
     local content="$2"
 
-    # base64 エンコード（Linux: -w 0 でラップなし。printf で余分な末尾改行を避ける）
+    # macOS: base64 は改行あり出力のため tr -d '\n' で除去
+    # Linux の場合は base64 -w 0 を使用
     local encoded
-    encoded=$(printf '%s' "$content" | base64 -w 0)
+    encoded=$(printf '%s' "$content" | base64 | tr -d '\n')
 
-    # 既存ファイルの SHA 取得（更新時に必須。新規の場合は空文字）
     local sha
     sha=$(gh api "repos/${ORG}/${REPORT_REPO}/contents/${file_path}" \
         --jq '.sha' 2>/dev/null || echo "")
 
-    # PUT ペイロードを Python3 で構築（JSON の安全な組み立て）
     local filename="${file_path##*/}"
     local payload
     payload=$(python3 -c "
@@ -305,7 +294,7 @@ except:
     fi
 }
 
-# ---------- Slack サマリーメッセージ生成 ----------
+# ---------- Slack サマリー生成 ----------
 
 build_slack_summary() {
     local date="$1"
@@ -352,22 +341,20 @@ main() {
 
     load_env
 
-    # GitHub 認証チェック
     if ! gh api user >/dev/null 2>&1; then
         echo "$(date '+%Y-%m-%d %H:%M:%S') [ERROR] GitHub CLI が認証されていません (gh auth login を実行)" >&2
         exit 1
     fi
 
-    # 日付計算（GNU date: Asia/Tokyo 前提。VPS は Asia/Tokyo に設定済み）
+    # 日付計算（macOS BSD date: -v-1d で前日）
     local yesterday
-    yesterday=$(date -d "yesterday" '+%Y-%m-%d')
+    yesterday=$(date -v-1d '+%Y-%m-%d')
 
     local since="${yesterday}T00:00:00+09:00"
     local until="${yesterday}T23:59:59+09:00"
 
     echo "$(date '+%Y-%m-%d %H:%M:%S') 対象日: $yesterday"
 
-    # データ収集
     echo "$(date '+%Y-%m-%d %H:%M:%S') コミット収集中..."
     local commits_tsv
     commits_tsv=$(collect_commits "$since" "$until")
@@ -380,17 +367,14 @@ main() {
     local issues_tsv
     issues_tsv=$(collect_issues "$yesterday")
 
-    # Markdown 日報生成
     echo "$(date '+%Y-%m-%d %H:%M:%S') Markdown 生成中..."
     local report_content
     report_content=$(generate_report "$yesterday" "$commits_tsv" "$prs_tsv" "$issues_tsv")
 
-    # GitHub に保存（Noroshi-Ltd/daily-report の reports/ 以下）
     local file_path="${REPORT_PATH_PREFIX}/${yesterday}.md"
     echo "$(date '+%Y-%m-%d %H:%M:%S') GitHub に保存中: $file_path"
     save_to_github "$file_path" "$report_content"
 
-    # Slack 通知
     local report_url="https://github.com/${ORG}/${REPORT_REPO}/blob/main/${file_path}"
     local slack_msg
     slack_msg=$(build_slack_summary "$yesterday" "$commits_tsv" "$prs_tsv" "$issues_tsv" "$report_url")
