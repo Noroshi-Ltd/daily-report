@@ -28,6 +28,9 @@ REPORT_REPO="daily-report"
 REPORT_PATH_PREFIX="reports"
 ENV_FILE="$HOME/.env-openclaw"
 
+# 進捗報告対象メンバー（GitHub ログイン名）
+REPORT_MEMBERS=("Haruya-SA" "KokiNishihara")
+
 # ---------- 環境変数読み込み ----------
 
 load_env() {
@@ -501,11 +504,20 @@ build_slack_summary() {
 
     if [ -n "$commits_tsv" ]; then
         printf '\n*メンバー別活動*\n'
+        printf '_凡例:  🔴 今日クローズ  🟢 クローズ済み  ◻ 未完了_\n'
         local members
         members=$(echo "$commits_tsv" | awk -F'\t' '{print $1}' | sort | uniq -c | sort -rn)
 
         echo "$members" | while read -r cnt name; do
             [ -z "$name" ] && continue
+
+            # 報告対象メンバー以外はスキップ
+            local is_target=false
+            for m in "${REPORT_MEMBERS[@]}"; do
+                [ "$m" = "$name" ] && is_target=true && break
+            done
+            [ "$is_target" = false ] && continue
+
             printf '\n👤 *%s*  (%s commits)\n' "$name" "$cnt"
 
             # AI サマリー用データ収集
