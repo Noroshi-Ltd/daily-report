@@ -81,6 +81,29 @@ urlencode() {
     python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$1"
 }
 
+# ---------- 進捗バー ----------
+
+progress_bar() {
+    local done="$1"
+    local total="$2"
+    local width=10
+    [ "$total" -eq 0 ] && { printf '[░░░░░░░░░░]'; return; }
+    local filled=$(( done * width / total ))
+    local empty=$(( width - filled ))
+    local bar="" i
+    for (( i=0; i<filled; i++ )); do bar="${bar}█"; done
+    for (( i=0; i<empty; i++ )); do bar="${bar}░"; done
+    printf '[%s]' "$bar"
+}
+
+# ---------- メンバーのオープン Issue 数取得 ----------
+
+get_member_open_issue_count() {
+    local member="$1"
+    gh api "search/issues?q=org:${ORG}+is:issue+is:open+assignee:${member}&per_page=1" \
+        --jq '.total_count' 2>/dev/null || printf '%s' "0"
+}
+
 # ---------- リポジトリ一覧取得 ----------
 
 get_org_repos() {
@@ -388,21 +411,39 @@ build_slack_summary() {
             prs_text=$(echo "$prs_tsv" | awk -F'\t' -v m="$name" '$4==m {print "#"$2" "$3" ("$1")"}')
             closed_text=$(echo "$issues_tsv" | awk -F'\t' -v m="$name" '$5=="closed" && $4==m {print "#"$2" "$3" ("$1")"}')
 
-            # AI 生成サマリー（4項目フォーマット）
+            # AI 生成サマリー（箇条書きフォーマット）
             local summary
             summary=$(summarize_member_activity "$name" "$date" "$commits_text" "$closed_text" "$prs_text")
             if [ -n "$summary" ]; then
                 echo "$summary" | while IFS= read -r line; do
                     [ -z "$line" ] && continue
                     case "$line" in
-                        作業量:*)   printf '%s\n' "📊 ${line}" ;;
-                        作業内容:*) printf '%s\n' "🔧 ${line}" ;;
-                        難易度:*)   printf '%s\n' "⚡ ${line}" ;;
-                        成果:*)     printf '%s\n' "🎯 ${line}" ;;
-                        *)          printf '%s\n' "   ${line}" ;;
+                        作業量:*|作業内容:*|難易度:*|成果:*)
+                            printf '%s\n' "• ${line}" ;;
+                        *)
+                            printf '%s\n' "  ${line}" ;;
                     esac
                 done
             fi
+
+            # Issue 進捗（今日クローズ + 残オープン）
+            local closed_today_count open_count total_count
+            closed_today_count=0
+            [ -n "$closed_text" ] && closed_today_count=$(echo "$closed_text" | grep -c . 2>/dev/null || printf '%s' "0")
+            open_count=$(get_member_open_issue_count "$name")
+            total_count=$(( closed_today_count + open_count ))
+            local bar
+            bar=$(progress_bar "$closed_today_count" "$total_count")
+            printf 'Issue進捗: %s  今日クローズ %s件 / 残り %s件\n' "$bar" "$closed_today_count" "$open_count"
+
+            # 今日クローズしたイシュー一覧
+            if [ -n "$closed_text" ]; then
+                echo "$closed_text" | while IFS= read -r issue_line; do
+                    [ -z "$issue_line" ] && continue
+                    printf '%s\n' "  ✅ ${issue_line}"
+                done
+            fi
+
             printf '\n'
         done
     else
