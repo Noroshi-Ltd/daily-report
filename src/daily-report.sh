@@ -96,12 +96,115 @@ progress_bar() {
     printf '[%s]' "$bar"
 }
 
-# ---------- メンバーのオープン Issue 数取得 ----------
+# ---------- due date（Slack 向け）----------
 
-get_member_open_issue_count() {
+format_due_date_plain() {
+    local due_iso="$1"
+    [ -z "$due_iso" ] && return
+    local due_date="${due_iso%%T*}"
+    local date_info
+    date_info=$(python3 -c "
+from datetime import date
+import sys
+due = date.fromisoformat(sys.argv[1])
+today = date.today()
+diff = (due - today).days
+print(str(diff) + '\t' + str(due.month) + '/' + str(due.day))
+" "$due_date" 2>/dev/null) || return
+    local diff_days short_date
+    diff_days=$(echo "$date_info" | cut -f1)
+    short_date=$(echo "$date_info" | cut -f2)
+    if [ "$diff_days" -lt 0 ]; then
+        printf '⚠ %s日超過 (%s〆)' "$(( -diff_days ))" "$short_date"
+    elif [ "$diff_days" -eq 0 ]; then
+        printf '⚠ 今日〆'
+    else
+        printf '〆 %s (残り%s日)' "$short_date" "$diff_days"
+    fi
+}
+
+# ---------- メンバー別 Issue 進捗（マイルストーン単位・今日の進捗ハイライト）----------
+
+build_member_issue_progress() {
     local member="$1"
-    gh api "search/issues?q=org:${ORG}+is:issue+is:open+assignee:${member}&per_page=1" \
-        --jq '.total_count' 2>/dev/null || printf '%s' "0"
+    local closed_today_text="$2"  # format: "#NUM title (repo)" 1行1件
+
+    local repos_with_issues
+    repos_with_issues=$(gh search issues --assignee "$member" --owner "$ORG" \
+        --json repository \
+        --template '{{range .}}{{.repository.name}}{{"\n"}}{{end}}' 2>/dev/null | sort -u)
+
+    if [ -z "$repos_with_issues" ]; then
+        printf '  割り当てられた Issue はありません\n'
+        return
+    fi
+
+    local found=false
+    while IFS= read -r repo; do
+        [ -z "$repo" ] && continue
+
+        local issues_tsv
+        issues_tsv=$(gh issue list --repo "$ORG/$repo" --state all --assignee "$member" --limit 100 \
+            --json number,title,state,milestone \
+            --template '{{range .}}{{.number}}	{{.title}}	{{.state}}	{{if .milestone}}{{.milestone.title}}{{else}}(なし){{end}}	{{if .milestone}}{{.milestone.dueOn}}{{end}}{{"\n"}}{{end}}' 2>/dev/null)
+        [ -z "$issues_tsv" ] && continue
+
+        # 今日このリポジトリでクローズされた Issue 番号を抽出
+        local today_nums_for_repo=""
+        [ -n "$closed_today_text" ] && \
+            today_nums_for_repo=$(printf '%s\n' "$closed_today_text" | \
+                grep "(${repo})" | grep -oE '#[0-9]+' | tr -d '#')
+
+        found=true
+        printf '  *%s*\n' "$repo"
+
+        local milestones
+        milestones=$(printf '%s' "$issues_tsv" | awk -F'\t' '{print $4}' | awk '!seen[$0]++' | sort | \
+            awk '/^\(なし\)$/{last=$0; next} {print} END{if(last) print last}')
+
+        while IFS= read -r milestone; do
+            [ -z "$milestone" ] && continue
+
+            local ms_issues
+            ms_issues=$(printf '%s' "$issues_tsv" | awk -F'\t' -v ms="$milestone" '$4 == ms')
+
+            local open_count closed_count total
+            open_count=$(printf '%s' "$ms_issues"  | awk -F'\t' 'BEGIN{c=0} $3=="OPEN"   {c++} END{print c}')
+            closed_count=$(printf '%s' "$ms_issues" | awk -F'\t' 'BEGIN{c=0} $3=="CLOSED" {c++} END{print c}')
+            total=$((open_count + closed_count))
+
+            local bar
+            bar=$(progress_bar "$closed_count" "$total")
+
+            local due_on due_str=""
+            due_on=$(printf '%s' "$ms_issues" | head -1 | awk -F'\t' '{print $5}')
+            [ -n "$due_on" ] && due_str=" $(format_due_date_plain "$due_on")"
+
+            if [ "$open_count" -eq 0 ]; then
+                # 完了済みマイルストーン: 折りたたみ
+                printf '    %s %s/%s *%s* ✅\n' "$bar" "$closed_count" "$total" "$milestone"
+            else
+                # 進行中マイルストーン: Issue 一覧展開、今日クローズ分を ★ でハイライト
+                printf '    %s %s/%s *%s*%s\n' "$bar" "$closed_count" "$total" "$milestone" "$due_str"
+                printf '%s' "$ms_issues" | sort -t$'\t' -k3,3 -k1,1n | while IFS=$'\t' read -r num title state ms_col due_col; do
+                    [ -z "$num" ] && continue
+                    if [ "$state" = "CLOSED" ]; then
+                        if printf '%s\n' "$today_nums_for_repo" | grep -qx "$num"; then
+                            printf '      ★  #%s %s\n' "$num" "$title"
+                        else
+                            printf '      ~✅ #%s %s~\n' "$num" "$title"
+                        fi
+                    else
+                        printf '      ○  #%s %s\n' "$num" "$title"
+                    fi
+                done
+            fi
+        done <<< "$milestones"
+
+        printf '\n'
+    done <<< "$repos_with_issues"
+
+    [ "$found" = false ] && printf '  割り当てられた Issue はありません\n'
 }
 
 # ---------- リポジトリ一覧取得 ----------
@@ -426,23 +529,9 @@ build_slack_summary() {
                 done
             fi
 
-            # Issue 進捗（今日クローズ + 残オープン）
-            local closed_today_count open_count total_count
-            closed_today_count=0
-            [ -n "$closed_text" ] && closed_today_count=$(echo "$closed_text" | grep -c . 2>/dev/null || printf '%s' "0")
-            open_count=$(get_member_open_issue_count "$name")
-            total_count=$(( closed_today_count + open_count ))
-            local bar
-            bar=$(progress_bar "$closed_today_count" "$total_count")
-            printf 'Issue進捗: %s  今日クローズ %s件 / 残り %s件\n' "$bar" "$closed_today_count" "$open_count"
-
-            # 今日クローズしたイシュー一覧
-            if [ -n "$closed_text" ]; then
-                echo "$closed_text" | while IFS= read -r issue_line; do
-                    [ -z "$issue_line" ] && continue
-                    printf '%s\n' "  ✅ ${issue_line}"
-                done
-            fi
+            # Issue 進捗（マイルストーン別・今日の進捗ハイライト）
+            printf '*Issue進捗*\n'
+            build_member_issue_progress "$name" "$closed_text"
 
             printf '\n'
         done
