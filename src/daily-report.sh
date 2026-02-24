@@ -327,18 +327,26 @@ build_slack_summary() {
             [ -z "$name" ] && continue
             printf '  • *%s* (%s commits)\n' "$name" "$cnt"
 
-            # コミットしたリポジトリ（件数付き）
-            echo "$commits_tsv" | awk -F'\t' -v m="$name" '$1==m {print $2}' | \
-                sort | uniq -c | sort -rn | \
-                while read -r rcnt repo; do
-                    printf '    └ `%s`  %s commits\n' "$repo" "$rcnt"
-                done
+            # リポジトリ別にコミットメッセージを表示
+            local member_repos
+            member_repos=$(echo "$commits_tsv" | awk -F'\t' -v m="$name" '$1==m {print $2}' | sort -u)
+            echo "$member_repos" | while IFS= read -r repo; do
+                [ -z "$repo" ] && continue
+                local rcnt
+                rcnt=$(echo "$commits_tsv" | awk -F'\t' -v m="$name" -v r="$repo" '$1==m && $2==r' | wc -l | tr -d ' ')
+                printf '    💻 *%s* (%s commits)\n' "$repo" "$rcnt"
+                echo "$commits_tsv" | awk -F'\t' -v m="$name" -v r="$repo" '$1==m && $2==r {print $3, $4}' | \
+                    while read -r sha msg; do
+                        [ -z "$sha" ] && continue
+                        printf '%s\n' "      · \`$sha\` $msg"
+                    done
+            done
 
             # クローズしたイシュー
             local closed
             closed=$(echo "$issues_tsv" | awk -F'\t' -v m="$name" '$5=="closed" && $4==m')
             if [ -n "$closed" ]; then
-                printf '    ✅ クローズ:\n'
+                printf '    ✅ *クローズした Issue:*\n'
                 echo "$closed" | while IFS=$'\t' read -r repo num title author ev; do
                     [ -z "$num" ] && continue
                     printf '%s\n' "      · #$num $title  _($repo)_"
