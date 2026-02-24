@@ -321,17 +321,35 @@ build_slack_summary() {
 
     if [ -n "$commits_tsv" ]; then
         printf '\n*アクティブメンバー:*\n'
-        echo "$commits_tsv" | awk -F'\t' '{print $1}' | sort | uniq -c | sort -rn | \
-            while read -r cnt name; do
-                printf '  • %s (%s commits)\n' "$name" "$cnt"
-            done
+        local members
+        members=$(echo "$commits_tsv" | awk -F'\t' '{print $1}' | sort | uniq -c | sort -rn)
+        echo "$members" | while read -r cnt name; do
+            [ -z "$name" ] && continue
+            printf '  • *%s* (%s commits)\n' "$name" "$cnt"
+
+            # コミットしたリポジトリ（件数付き）
+            echo "$commits_tsv" | awk -F'\t' -v m="$name" '$1==m {print $2}' | \
+                sort | uniq -c | sort -rn | \
+                while read -r rcnt repo; do
+                    printf '    └ `%s`  %s commits\n' "$repo" "$rcnt"
+                done
+
+            # クローズしたイシュー
+            local closed
+            closed=$(echo "$issues_tsv" | awk -F'\t' -v m="$name" '$5=="closed" && $4==m')
+            if [ -n "$closed" ]; then
+                printf '    ✅ クローズ:\n'
+                echo "$closed" | while IFS=$'\t' read -r repo num title author ev; do
+                    [ -z "$num" ] && continue
+                    printf '%s\n' "      · #$num $title  _($repo)_"
+                done
+            fi
+        done
     else
         printf '\n活動なし\n'
     fi
 
-    printf '\n<'
-    printf '%s' "$report_url"
-    printf '|詳細レポートを見る>\n'
+    printf '\n<%s|詳細レポートを見る>\n' "$report_url"
 }
 
 # ---------- メイン ----------
