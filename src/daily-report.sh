@@ -190,12 +190,12 @@ build_member_issue_progress() {
                     [ -z "$num" ] && continue
                     if [ "$state" = "CLOSED" ]; then
                         if printf '%s\n' "$today_nums_for_repo" | grep -qx "$num"; then
-                            printf '      ★  #%s %s\n' "$num" "$title"
+                            printf '      🔴 *#%s %s*\n' "$num" "$title"
                         else
-                            printf '      ~✅ #%s %s~\n' "$num" "$title"
+                            printf '      🟢 ~#%s %s~\n' "$num" "$title"
                         fi
                     else
-                        printf '      ○  #%s %s\n' "$num" "$title"
+                        printf '      ◻  #%s %s\n' "$num" "$title"
                     fi
                 done
             fi
