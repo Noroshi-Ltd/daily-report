@@ -170,7 +170,7 @@ generate_report() {
 
     printf '# 日報 %s\n\n' "$date"
     printf '> 自動生成: %s JST\n\n' "$(date '+%Y-%m-%d %H:%M:%S')"
-    printf '---\n\n'
+    printf '%s\n\n' '---'
 
     printf '## コミット\n\n'
     if [ -z "$commits_tsv" ]; then
@@ -186,7 +186,7 @@ generate_report() {
             printf '### %s (%s commits)\n\n' "$author" "$count"
             while IFS=$'\t' read -r _auth repo sha msg; do
                 [ -z "$sha" ] && continue
-                printf '- `%s` [%s] %s\n' "$sha" "$repo" "$msg"
+                printf '%s\n' "- \`$sha\` [$repo] $msg"
             done <<< "$author_commits"
             printf '\n'
         done <<< "$authors"
@@ -201,7 +201,7 @@ generate_report() {
         printf '合計 %s 件\n\n' "$pr_count"
         while IFS=$'\t' read -r repo num title author; do
             [ -z "$num" ] && continue
-            printf '- **[%s#%s]** %s _(@%s)_\n' "$repo" "$num" "$title" "$author"
+            printf '%s\n' "- **[$repo#$num]** $title _(@$author)_"
         done <<< "$prs_tsv"
         printf '\n'
     fi
@@ -220,7 +220,7 @@ generate_report() {
             printf '### 新規オープン (%s 件)\n\n' "$opened_count"
             while IFS=$'\t' read -r repo num title author _ev; do
                 [ -z "$num" ] && continue
-                printf '- **[%s#%s]** %s _(@%s)_\n' "$repo" "$num" "$title" "$author"
+                printf '%s\n' "- **[$repo#$num]** $title _(@$author)_"
             done <<< "$opened_issues"
             printf '\n'
         fi
@@ -231,13 +231,13 @@ generate_report() {
             printf '### クローズ (%s 件)\n\n' "$closed_count"
             while IFS=$'\t' read -r repo num title author _ev; do
                 [ -z "$num" ] && continue
-                printf '- **[%s#%s]** %s _(@%s)_\n' "$repo" "$num" "$title" "$author"
+                printf '%s\n' "- **[$repo#$num]** $title _(@$author)_"
             done <<< "$closed_issues"
             printf '\n'
         fi
     fi
 
-    printf '---\n\n'
+    printf '%s\n\n' '---'
     printf '_このドキュメントは `src/daily-report.sh` により自動生成されました。_\n'
 }
 
