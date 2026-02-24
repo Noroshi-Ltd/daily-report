@@ -316,10 +316,13 @@ if not api_key:
 
 prompt = (
     f'以下は {name} の {date} のGitHub活動データです。\n'
-    '経営者やマネージャーが見て「このメンバーが今日何を成し遂げたか・どれほど頑張ったか」が'
-    '直感的に伝わる、2文の日本語サマリーを書いてください。\n'
-    '技術用語は使わず、作業の規模感・難易度・成果を具体的かつ簡潔に伝えてください。'
-    'サマリー文のみ出力し、前置きや説明は不要です。\n\n'
+    '経営者・マネージャー向けに、下記の4項目をそれぞれ1〜2文の日本語で評価してください。\n'
+    '技術用語は使わず、わかりやすい言葉で表現してください。\n'
+    '指定のラベルを正確に使い、他の文言・前置き・説明は一切出力しないでください。\n\n'
+    '作業量: （本日の活動ボリューム全体を平易な言葉で評価する）\n'
+    '作業内容: （どのような性質・種類の仕事をしたかを具体的に説明する）\n'
+    '難易度: （★1〜5で表し、その根拠を1文で補足する）\n'
+    '成果: （今日の活動でチームや事業に何をもたらしたかを述べる）\n\n'
     f'【コミット内容】\n{commits_text}\n\n'
     f'【クローズしたIssue】\n{closed_text}\n\n'
     f'【マージしたPR】\n{prs_text}'
@@ -385,26 +388,22 @@ build_slack_summary() {
             prs_text=$(echo "$prs_tsv" | awk -F'\t' -v m="$name" '$4==m {print "#"$2" "$3" ("$1")"}')
             closed_text=$(echo "$issues_tsv" | awk -F'\t' -v m="$name" '$5=="closed" && $4==m {print "#"$2" "$3" ("$1")"}')
 
-            # AI 生成サマリー
+            # AI 生成サマリー（4項目フォーマット）
             local summary
             summary=$(summarize_member_activity "$name" "$date" "$commits_text" "$closed_text" "$prs_text")
             if [ -n "$summary" ]; then
-                printf '%s\n' "_${summary}_"
+                echo "$summary" | while IFS= read -r line; do
+                    [ -z "$line" ] && continue
+                    case "$line" in
+                        作業量:*)   printf '%s\n' "📊 ${line}" ;;
+                        作業内容:*) printf '%s\n' "🔧 ${line}" ;;
+                        難易度:*)   printf '%s\n' "⚡ ${line}" ;;
+                        成果:*)     printf '%s\n' "🎯 ${line}" ;;
+                        *)          printf '%s\n' "   ${line}" ;;
+                    esac
+                done
             fi
-
-            # リポジトリ別コミット数（1行で）
-            local repo_summary
-            repo_summary=$(echo "$commits_tsv" | awk -F'\t' -v m="$name" '$1==m {print $2}' | \
-                sort | uniq -c | sort -rn | \
-                awk '{printf "%s × %s  ", $2, $1}' | sed 's/  $//')
-            printf '💻  %s\n' "$repo_summary"
-
-            # クローズした Issue
-            if [ -n "$closed_text" ]; then
-                printf '✅  '
-                echo "$closed_text" | tr '\n' '  ' | sed 's/  $//'
-                printf '\n'
-            fi
+            printf '\n'
         done
     else
         printf '\n活動なし\n'
