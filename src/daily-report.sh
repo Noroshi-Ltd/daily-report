@@ -81,6 +81,29 @@ urlencode() {
     python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$1"
 }
 
+# ---------- 進捗バー ----------
+
+progress_bar() {
+    local done="$1"
+    local total="$2"
+    local width=10
+    [ "$total" -eq 0 ] && { printf '[░░░░░░░░░░]'; return; }
+    local filled=$(( done * width / total ))
+    local empty=$(( width - filled ))
+    local bar="" i
+    for (( i=0; i<filled; i++ )); do bar="${bar}█"; done
+    for (( i=0; i<empty; i++ )); do bar="${bar}░"; done
+    printf '[%s]' "$bar"
+}
+
+# ---------- メンバーのオープン Issue 数取得 ----------
+
+get_member_open_issue_count() {
+    local member="$1"
+    gh api "search/issues?q=org:${ORG}+is:issue+is:open+assignee:${member}&per_page=1" \
+        --jq '.total_count' 2>/dev/null || printf '%s' "0"
+}
+
 # ---------- リポジトリ一覧取得 ----------
 
 get_org_repos() {
@@ -170,7 +193,7 @@ generate_report() {
 
     printf '# 日報 %s\n\n' "$date"
     printf '> 自動生成: %s JST\n\n' "$(date '+%Y-%m-%d %H:%M:%S')"
-    printf '---\n\n'
+    printf '%s\n\n' '---'
 
     printf '## コミット\n\n'
     if [ -z "$commits_tsv" ]; then
@@ -186,7 +209,7 @@ generate_report() {
             printf '### %s (%s commits)\n\n' "$author" "$count"
             while IFS=$'\t' read -r _auth repo sha msg; do
                 [ -z "$sha" ] && continue
-                printf '- `%s` [%s] %s\n' "$sha" "$repo" "$msg"
+                printf '%s\n' "- \`$sha\` [$repo] $msg"
             done <<< "$author_commits"
             printf '\n'
         done <<< "$authors"
@@ -201,7 +224,7 @@ generate_report() {
         printf '合計 %s 件\n\n' "$pr_count"
         while IFS=$'\t' read -r repo num title author; do
             [ -z "$num" ] && continue
-            printf '- **[%s#%s]** %s _(@%s)_\n' "$repo" "$num" "$title" "$author"
+            printf '%s\n' "- **[$repo#$num]** $title _(@$author)_"
         done <<< "$prs_tsv"
         printf '\n'
     fi
@@ -220,7 +243,7 @@ generate_report() {
             printf '### 新規オープン (%s 件)\n\n' "$opened_count"
             while IFS=$'\t' read -r repo num title author _ev; do
                 [ -z "$num" ] && continue
-                printf '- **[%s#%s]** %s _(@%s)_\n' "$repo" "$num" "$title" "$author"
+                printf '%s\n' "- **[$repo#$num]** $title _(@$author)_"
             done <<< "$opened_issues"
             printf '\n'
         fi
@@ -231,13 +254,13 @@ generate_report() {
             printf '### クローズ (%s 件)\n\n' "$closed_count"
             while IFS=$'\t' read -r repo num title author _ev; do
                 [ -z "$num" ] && continue
-                printf '- **[%s#%s]** %s _(@%s)_\n' "$repo" "$num" "$title" "$author"
+                printf '%s\n' "- **[$repo#$num]** $title _(@$author)_"
             done <<< "$closed_issues"
             printf '\n'
         fi
     fi
 
-    printf '---\n\n'
+    printf '%s\n\n' '---'
     printf '_このドキュメントは `src/daily-report.sh` により自動生成されました。_\n'
 }
 
@@ -296,6 +319,62 @@ except:
 
 # ---------- Slack サマリー生成 ----------
 
+# Claude API でメンバー活動の自然言語サマリーを生成
+summarize_member_activity() {
+    local name="$1"
+    local date="$2"
+    local commits_text="$3"
+    local closed_text="${4:-なし}"
+    local prs_text="${5:-なし}"
+
+    [ -z "${ANTHROPIC_API_KEY:-}" ] && return 1
+
+    python3 -c "
+import json, urllib.request, os, sys
+
+name, date, commits_text, closed_text, prs_text = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
+api_key = os.environ.get('ANTHROPIC_API_KEY', '')
+if not api_key:
+    sys.exit(1)
+
+prompt = (
+    f'以下は {name} の {date} のGitHub活動データです。\n'
+    '経営者・マネージャー向けに、下記の4項目をそれぞれ1〜2文の日本語で評価してください。\n'
+    '技術用語は使わず、わかりやすい言葉で表現してください。\n'
+    '指定のラベルを正確に使い、他の文言・前置き・説明は一切出力しないでください。\n\n'
+    '作業量: （本日の活動ボリューム全体を平易な言葉で評価する）\n'
+    '作業内容: （どのような性質・種類の仕事をしたかを具体的に説明する）\n'
+    '難易度: （★1〜5で表し、その根拠を1文で補足する）\n'
+    '成果: （今日の活動でチームや事業に何をもたらしたかを述べる）\n\n'
+    f'【コミット内容】\n{commits_text}\n\n'
+    f'【クローズしたIssue】\n{closed_text}\n\n'
+    f'【マージしたPR】\n{prs_text}'
+)
+
+payload = json.dumps({
+    'model': 'claude-haiku-4-5-20251001',
+    'max_tokens': 200,
+    'messages': [{'role': 'user', 'content': prompt}]
+}).encode()
+
+req = urllib.request.Request(
+    'https://api.anthropic.com/v1/messages',
+    data=payload,
+    headers={
+        'x-api-key': api_key,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json'
+    }
+)
+try:
+    with urllib.request.urlopen(req, timeout=20) as r:
+        data = json.load(r)
+        print(data['content'][0]['text'].strip())
+except Exception:
+    pass
+" "$name" "$date" "$commits_text" "$closed_text" "$prs_text" 2>/dev/null
+}
+
 build_slack_summary() {
     local date="$1"
     local commits_tsv="$2"
@@ -314,24 +393,64 @@ build_slack_summary() {
 
     printf '*📊 %s の活動サマリー*\n' "$date"
     printf '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n'
-    printf '• 💻 コミット: *%s 件*\n' "$commit_count"
-    printf '• 🔀 マージ PR: *%s 件*\n' "$pr_count"
-    printf '• 🆕 新規 Issue: *%s 件*\n' "$opened_count"
-    printf '• ✅ クローズ Issue: *%s 件*\n' "$closed_count"
+    printf '• 💻 コミット: *%s 件*  •  🔀 PR マージ: *%s 件*\n' "$commit_count" "$pr_count"
+    printf '• 🆕 新規 Issue: *%s 件*  •  ✅ クローズ Issue: *%s 件*\n' "$opened_count" "$closed_count"
 
     if [ -n "$commits_tsv" ]; then
-        printf '\n*アクティブメンバー:*\n'
-        echo "$commits_tsv" | awk -F'\t' '{print $1}' | sort | uniq -c | sort -rn | \
-            while read -r cnt name; do
-                printf '  • %s (%s commits)\n' "$name" "$cnt"
-            done
+        printf '\n*メンバー別活動*\n'
+        local members
+        members=$(echo "$commits_tsv" | awk -F'\t' '{print $1}' | sort | uniq -c | sort -rn)
+
+        echo "$members" | while read -r cnt name; do
+            [ -z "$name" ] && continue
+            printf '\n👤 *%s*  (%s commits)\n' "$name" "$cnt"
+
+            # AI サマリー用データ収集
+            local commits_text prs_text closed_text
+            commits_text=$(echo "$commits_tsv" | awk -F'\t' -v m="$name" '$1==m {print $2": "$4}')
+            prs_text=$(echo "$prs_tsv" | awk -F'\t' -v m="$name" '$4==m {print "#"$2" "$3" ("$1")"}')
+            closed_text=$(echo "$issues_tsv" | awk -F'\t' -v m="$name" '$5=="closed" && $4==m {print "#"$2" "$3" ("$1")"}')
+
+            # AI 生成サマリー（箇条書きフォーマット）
+            local summary
+            summary=$(summarize_member_activity "$name" "$date" "$commits_text" "$closed_text" "$prs_text")
+            if [ -n "$summary" ]; then
+                echo "$summary" | while IFS= read -r line; do
+                    [ -z "$line" ] && continue
+                    case "$line" in
+                        作業量:*|作業内容:*|難易度:*|成果:*)
+                            printf '%s\n' "• ${line}" ;;
+                        *)
+                            printf '%s\n' "  ${line}" ;;
+                    esac
+                done
+            fi
+
+            # Issue 進捗（今日クローズ + 残オープン）
+            local closed_today_count open_count total_count
+            closed_today_count=0
+            [ -n "$closed_text" ] && closed_today_count=$(echo "$closed_text" | grep -c . 2>/dev/null || printf '%s' "0")
+            open_count=$(get_member_open_issue_count "$name")
+            total_count=$(( closed_today_count + open_count ))
+            local bar
+            bar=$(progress_bar "$closed_today_count" "$total_count")
+            printf 'Issue進捗: %s  今日クローズ %s件 / 残り %s件\n' "$bar" "$closed_today_count" "$open_count"
+
+            # 今日クローズしたイシュー一覧
+            if [ -n "$closed_text" ]; then
+                echo "$closed_text" | while IFS= read -r issue_line; do
+                    [ -z "$issue_line" ] && continue
+                    printf '%s\n' "  ✅ ${issue_line}"
+                done
+            fi
+
+            printf '\n'
+        done
     else
         printf '\n活動なし\n'
     fi
 
-    printf '\n<'
-    printf '%s' "$report_url"
-    printf '|詳細レポートを見る>\n'
+    printf '\n<%s|詳細レポートを見る>\n' "$report_url"
 }
 
 # ---------- メイン ----------
