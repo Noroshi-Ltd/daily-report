@@ -296,6 +296,59 @@ except:
 
 # ---------- Slack サマリー生成 ----------
 
+# Claude API でメンバー活動の自然言語サマリーを生成
+summarize_member_activity() {
+    local name="$1"
+    local date="$2"
+    local commits_text="$3"
+    local closed_text="${4:-なし}"
+    local prs_text="${5:-なし}"
+
+    [ -z "${ANTHROPIC_API_KEY:-}" ] && return 1
+
+    python3 -c "
+import json, urllib.request, os, sys
+
+name, date, commits_text, closed_text, prs_text = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
+api_key = os.environ.get('ANTHROPIC_API_KEY', '')
+if not api_key:
+    sys.exit(1)
+
+prompt = (
+    f'以下は {name} の {date} のGitHub活動データです。\n'
+    '経営者やマネージャーが見て「このメンバーが今日何を成し遂げたか・どれほど頑張ったか」が'
+    '直感的に伝わる、2文の日本語サマリーを書いてください。\n'
+    '技術用語は使わず、作業の規模感・難易度・成果を具体的かつ簡潔に伝えてください。'
+    'サマリー文のみ出力し、前置きや説明は不要です。\n\n'
+    f'【コミット内容】\n{commits_text}\n\n'
+    f'【クローズしたIssue】\n{closed_text}\n\n'
+    f'【マージしたPR】\n{prs_text}'
+)
+
+payload = json.dumps({
+    'model': 'claude-haiku-4-5-20251001',
+    'max_tokens': 200,
+    'messages': [{'role': 'user', 'content': prompt}]
+}).encode()
+
+req = urllib.request.Request(
+    'https://api.anthropic.com/v1/messages',
+    data=payload,
+    headers={
+        'x-api-key': api_key,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json'
+    }
+)
+try:
+    with urllib.request.urlopen(req, timeout=20) as r:
+        data = json.load(r)
+        print(data['content'][0]['text'].strip())
+except Exception:
+    pass
+" "$name" "$date" "$commits_text" "$closed_text" "$prs_text" 2>/dev/null
+}
+
 build_slack_summary() {
     local date="$1"
     local commits_tsv="$2"
@@ -314,43 +367,43 @@ build_slack_summary() {
 
     printf '*📊 %s の活動サマリー*\n' "$date"
     printf '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n'
-    printf '• 💻 コミット: *%s 件*\n' "$commit_count"
-    printf '• 🔀 マージ PR: *%s 件*\n' "$pr_count"
-    printf '• 🆕 新規 Issue: *%s 件*\n' "$opened_count"
-    printf '• ✅ クローズ Issue: *%s 件*\n' "$closed_count"
+    printf '• 💻 コミット: *%s 件*  •  🔀 PR マージ: *%s 件*\n' "$commit_count" "$pr_count"
+    printf '• 🆕 新規 Issue: *%s 件*  •  ✅ クローズ Issue: *%s 件*\n' "$opened_count" "$closed_count"
 
     if [ -n "$commits_tsv" ]; then
-        printf '\n*アクティブメンバー:*\n'
+        printf '\n*メンバー別活動*\n'
         local members
         members=$(echo "$commits_tsv" | awk -F'\t' '{print $1}' | sort | uniq -c | sort -rn)
+
         echo "$members" | while read -r cnt name; do
             [ -z "$name" ] && continue
-            printf '  • *%s* (%s commits)\n' "$name" "$cnt"
+            printf '\n👤 *%s*  (%s commits)\n' "$name" "$cnt"
 
-            # リポジトリ別にコミットメッセージを表示
-            local member_repos
-            member_repos=$(echo "$commits_tsv" | awk -F'\t' -v m="$name" '$1==m {print $2}' | sort -u)
-            echo "$member_repos" | while IFS= read -r repo; do
-                [ -z "$repo" ] && continue
-                local rcnt
-                rcnt=$(echo "$commits_tsv" | awk -F'\t' -v m="$name" -v r="$repo" '$1==m && $2==r' | wc -l | tr -d ' ')
-                printf '    💻 *%s* (%s commits)\n' "$repo" "$rcnt"
-                echo "$commits_tsv" | awk -F'\t' -v m="$name" -v r="$repo" '$1==m && $2==r {print $3, $4}' | \
-                    while read -r sha msg; do
-                        [ -z "$sha" ] && continue
-                        printf '%s\n' "      · \`$sha\` $msg"
-                    done
-            done
+            # AI サマリー用データ収集
+            local commits_text prs_text closed_text
+            commits_text=$(echo "$commits_tsv" | awk -F'\t' -v m="$name" '$1==m {print $2": "$4}')
+            prs_text=$(echo "$prs_tsv" | awk -F'\t' -v m="$name" '$4==m {print "#"$2" "$3" ("$1")"}')
+            closed_text=$(echo "$issues_tsv" | awk -F'\t' -v m="$name" '$5=="closed" && $4==m {print "#"$2" "$3" ("$1")"}')
 
-            # クローズしたイシュー
-            local closed
-            closed=$(echo "$issues_tsv" | awk -F'\t' -v m="$name" '$5=="closed" && $4==m')
-            if [ -n "$closed" ]; then
-                printf '    ✅ *クローズした Issue:*\n'
-                echo "$closed" | while IFS=$'\t' read -r repo num title author ev; do
-                    [ -z "$num" ] && continue
-                    printf '%s\n' "      · #$num $title  _($repo)_"
-                done
+            # AI 生成サマリー
+            local summary
+            summary=$(summarize_member_activity "$name" "$date" "$commits_text" "$closed_text" "$prs_text")
+            if [ -n "$summary" ]; then
+                printf '%s\n' "_${summary}_"
+            fi
+
+            # リポジトリ別コミット数（1行で）
+            local repo_summary
+            repo_summary=$(echo "$commits_tsv" | awk -F'\t' -v m="$name" '$1==m {print $2}' | \
+                sort | uniq -c | sort -rn | \
+                awk '{printf "%s × %s  ", $2, $1}' | sed 's/  $//')
+            printf '💻  %s\n' "$repo_summary"
+
+            # クローズした Issue
+            if [ -n "$closed_text" ]; then
+                printf '✅  '
+                echo "$closed_text" | tr '\n' '  ' | sed 's/  $//'
+                printf '\n'
             fi
         done
     else
