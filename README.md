@@ -2,6 +2,15 @@
 
 Noroshi 組織の GitHub 活動を毎日自動記録する日報リポジトリ。
 
+## 🔗 Notion 対応ページ
+
+- **主配置 Teamspace**: AI Observatory（T2 Digest 系の書込先）
+- **Notion ページ (主)**: [🚀 daily-report（主）](https://www.notion.so/daily-report-9e1d62c0e23d4b0492ccf5e9a49c2dc2)
+- **従配置 Teamspace**: Marketing（Content Calendar 補助）
+- **Notion ページ (従)**: [📰 daily-report（従）](https://www.notion.so/daily-report-965e8594ce4f4131a36efe797904a0aa)
+- **マッピング SSoT**: `client-noroshi/profiles/noroshi/notion-mapping.md`
+- **同期方針**: GitHub 主（生成スクリプト）→ Notion（出力先 Digest DB）
+
 ---
 
 ## リポジトリ構成
